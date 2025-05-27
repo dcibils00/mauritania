@@ -1,0 +1,702 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Mauritania: Basic Life Forms (WebGL)</title>
+    <style>
+        /* Basic styling to center the canvas and set background */
+        body {
+            margin: 0;
+            overflow: hidden;
+            background-color: #333;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            min-height: 100vh;
+            flex-direction: column; /* Stack canvas and controls vertically */
+        }
+        /* Style the canvas with a border and background */
+        canvas {
+            border: 1px solid #555;
+            background-color: #000;
+            display: block; /* Remove extra space below canvas */
+            margin-bottom: 10px; /* Space between canvas and controls */
+        }
+        /* Style for the information overlay */
+        #info {
+            position: absolute;
+            top: 10px;
+            left: 10px;
+            color: white;
+            font-family: monospace;
+            font-size: 14px;
+            background: rgba(0,0,0,0.5); /* Semi-transparent background */
+            padding: 10px;
+            border-radius: 5px;
+            pointer-events: none; /* Allow clicks to pass through to the canvas */
+            z-index: 10; /* Ensure it's above the canvas */
+        }
+
+        /* Style for the controls container */
+        #controls {
+            display: flex;
+            gap: 10px; /* Space between buttons */
+            align-items: center;
+            color: white;
+            font-family: monospace;
+            font-size: 14px;
+        }
+
+        /* Style for the buttons */
+        #controls button {
+            padding: 8px 15px;
+            font-size: 14px;
+            font-family: monospace;
+            cursor: pointer;
+            border: none;
+            border-radius: 5px;
+            background-color: #555;
+            color: white;
+            transition: background-color 0.2s ease;
+        }
+
+        #controls button:hover {
+            background-color: #777;
+        }
+
+        #controls button:active {
+            background-color: #999;
+        }
+    </style>
+</head>
+<body>
+    <canvas id="gameCanvas" width="800" height="600"></canvas>
+
+    <div id="controls">
+        <button id="addFoodBtn">+ Food</button>
+        <button id="removeFoodBtn">- Food</button>
+        <span>Current Food: <span id="currentFoodCount">0</span></span>
+    </div>
+
+    <div id="info">
+        <p>Organisms (Green) move slowly when full, seek food when hungry.</p>
+        <p>Organisms reproduce when they have high energy.</p>
+        <p>Organisms lose energy, gain energy by eating.</p>
+        <p>If energy reaches zero, they die (fade out).</p>
+        <p>Energy bar above organisms shows remaining energy.</p>
+        <p>Population: <span id="populationCount">0</span></p>
+    </div>
+
+    <script>
+        // Get the canvas element and the WebGL rendering context
+        const canvas = document.getElementById('gameCanvas');
+        const gl = canvas.getContext('webgl');
+
+        // Check if WebGL is supported
+        if (!gl) {
+            alert('WebGL not supported. Please use a modern browser.');
+        }
+
+        // Enable alpha blending for transparency (needed for fade-out animation)
+        gl.enable(gl.BLEND);
+        gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+
+
+        // --- Shaders (GLSL) ---
+        // Vertex shader: Processes vertex data (position and color)
+        const vsSource = `
+            attribute vec2 a_position; // Vertex position (x, y)
+            attribute vec4 a_color;    // Vertex color (r, g, b, a)
+            uniform vec2 u_resolution; // Canvas resolution (width, height)
+
+            varying vec4 v_color;      // Pass color to the fragment shader
+
+            void main() {
+                // Convert position from pixel coordinates to 0.0 to 1.0 range
+                vec2 zeroToOne = a_position / u_resolution;
+                // Convert from 0.0 to 1.0 to -1.0 to +1.0 (clip space)
+                vec2 zeroToTwo = zeroToOne * 2.0;
+                vec2 clipSpace = zeroToTwo - 1.0;
+
+                // Set the final position (applying clip space and flipping Y)
+                gl_Position = vec4(clipSpace * vec2(1, -1), 0, 1);
+                // Pass the color to the fragment shader
+                v_color = a_color;
+            }
+        `;
+
+        // Fragment shader: Determines the color of each pixel
+        const fsSource = `
+            precision mediump float; // Set precision for floating point numbers
+            varying vec4 v_color;      // Receive color from the vertex shader
+
+            void main() {
+                // Set the pixel color to the interpolated color from the vertices
+                gl_FragColor = v_color;
+            }
+        `;
+
+        // --- WebGL Setup Functions ---
+
+        // Function to create and compile a shader
+        function createShader(gl, type, source) {
+            const shader = gl.createShader(type); // Create shader object
+            gl.shaderSource(shader, source);   // Set shader source code
+            gl.compileShader(shader);          // Compile the shader
+
+            // Check for compilation errors
+            if (!gl.getShaderParameter(shader, gl.COMPILE_STATUS)) {
+                console.error('Shader compilation error:', gl.getShaderInfoLog(shader));
+                gl.deleteShader(shader);
+                return null;
+            }
+            return shader;
+        }
+
+        // Function to create a WebGL program from vertex and fragment shaders
+        function createProgram(gl, vsSource, fsSource) {
+            const vertexShader = createShader(gl, gl.VERTEX_SHADER, vsSource);
+            const fragmentShader = createShader(gl, gl.FRAGMENT_SHADER, fsSource);
+
+            if (!vertexShader || !fragmentShader) {
+                return null; // Return null if shader creation failed
+            }
+
+            const program = gl.createProgram(); // Create program object
+            gl.attachShader(program, vertexShader); // Attach vertex shader
+            gl.attachShader(program, fragmentShader); // Attach fragment shader
+            gl.linkProgram(program); // Link the program
+
+            // Check for linking errors
+            if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
+                console.error('Program linking error:', gl.getProgramInfoLog(program));
+                gl.deleteProgram(program);
+                return null;
+            }
+            return program;
+        }
+
+        // Create the WebGL program
+        const program = createProgram(gl, vsSource, fsSource);
+        if (!program) {
+             console.error("Failed to create WebGL program.");
+             throw new Error("WebGL program creation failed.");
+        }
+        gl.useProgram(program); // Use the created program
+
+        // Get attribute and uniform locations
+        const positionAttributeLocation = gl.getAttribLocation(program, 'a_position');
+        const colorAttributeLocation = gl.getAttribLocation(program, 'a_color');
+        const resolutionUniformLocation = gl.getUniformLocation(program, 'u_resolution');
+
+        // Create buffers for position and color data
+        const positionBuffer = gl.createBuffer();
+        const colorBuffer = gl.createBuffer();
+
+        // Set the viewport to the canvas size
+        gl.viewport(0, 0, gl.canvas.width, gl.canvas.height);
+        gl.clearColor(0, 0, 0, 1); // Set clear color to black
+        gl.clear(gl.COLOR_BUFFER_BIT); // Clear the color buffer
+
+        // Set the resolution uniform (needed for converting pixels to clip space)
+        gl.uniform2f(resolutionUniformLocation, gl.canvas.width, gl.canvas.height);
+
+        // --- Game Logic ---
+
+        // Simulation parameters
+        const INITIAL_ORGANISMS = 20; // Initial number of organisms
+        const INITIAL_FOOD = 70;      // Initial number of food pellets
+        let currentFoodCount = INITIAL_FOOD; // Variable to track current food count
+        const ORGANISM_BASE_SIZE = 10; // Base size of organisms in pixels
+        const FOOD_SIZE = 5;      // Size of food pellets in pixels
+        const ORGANISM_BASE_SPEED = 0.7; // Base movement speed of organisms when hungry
+        const SLOW_SPEED_FACTOR = 0.2; // Factor to reduce speed when not hungry (e.g., 20% of normal speed)
+        const ENERGY_DECAY_RATE = 0.03; // Base rate at which organisms lose energy
+        const FOOD_ENERGY_VALUE = 40; // Energy gained from eating food
+        const MAX_ENERGY = 100;   // Maximum energy an organism can have
+        const ENERGY_BAR_HEIGHT = 3; // Height of the energy bar
+        const ENERGY_BAR_WIDTH_FACTOR = 1.5; // Energy bar width relative to organism size
+        const DEATH_ANIMATION_DURATION = 60; // Frames for death animation
+        const HUNGER_THRESHOLD = MAX_ENERGY * 0.6; // Organisms seek food when energy drops below this (adjusted slightly)
+        const REPRODUCTION_THRESHOLD = MAX_ENERGY * 0.9; // Organisms reproduce when energy is above this
+        const REPRODUCTION_COST = MAX_ENERGY * 0.4; // Energy cost for reproduction
+        const MUTATION_RATE = 0.1; // Probability of a gene mutating (per gene)
+        const MUTATION_AMOUNT = 0.1; // Maximum percentage change during mutation
+        const MAX_POPULATION = 300; // Maximum number of organisms allowed (increased slightly)
+        const MIN_FOOD = 10; // Minimum number of food items
+        const MAX_FOOD = 200; // Maximum number of food items
+
+        // Base class for entities in the simulation (Organisms and Food)
+        class Entity {
+            constructor(x, y, size, r, g, b) {
+                this.x = x;
+                this.y = y;
+                this.size = size;
+                this.r = r; // Red color component
+                this.g = g; // Green color component
+                this.b = b; // Blue color component
+                this.alpha = 1.0; // Alpha component for transparency
+                this.active = true; // Whether the entity is currently active (e.g., food hasn't been eaten)
+            }
+
+            // Get the vertices for drawing the entity as a square
+            getVertices() {
+                const x1 = this.x - this.size / 2;
+                const y1 = this.y - this.size / 2;
+                const x2 = this.x + this.size / 2;
+                const y2 = this.y + this.size / 2;
+                // Return vertices for two triangles that form a square
+                return [
+                    x1, y1, // top-left
+                    x2, y1, // top-right
+                    x1, y2, // bottom-left
+                    x1, y2, // bottom-left
+                    x2, y1, // top-right
+                    x2, y2, // bottom-right
+                ];
+            }
+
+            // Get the colors for the vertices (all vertices of an entity have the same color)
+            getColors() {
+                 // Use the entity's color with current alpha
+                const effectiveColor = [this.r, this.g, this.b, this.alpha];
+                // Return color data for all 6 vertices
+                return [
+                    ...effectiveColor, ...effectiveColor, ...effectiveColor,
+                    ...effectiveColor, ...effectiveColor, ...effectiveColor,
+                ];
+            }
+        }
+
+        // Represents an organism
+        class Organism extends Entity {
+            constructor(x, y, geneticCode = null) {
+                // If no genetic code is provided, create a random one
+                if (!geneticCode) {
+                    geneticCode = {
+                        speedMultiplier: 1.0 + (Math.random() - 0.5) * 0.5, // Base speed +/- 25%
+                        decayMultiplier: 1.0 + (Math.random() - 0.5) * 0.5, // Base decay +/- 25%
+                        sizeMultiplier: 1.0 + (Math.random() - 0.5) * 0.5,   // Base size +/- 25%
+                         // Add more genes here as we add more traits
+                    };
+                     // Clamp gene values to reasonable ranges
+                    geneticCode.speedMultiplier = Math.max(0.5, Math.min(2.0, geneticCode.speedMultiplier));
+                    geneticCode.decayMultiplier = Math.max(0.5, Math.min(2.0, geneticCode.decayMultiplier));
+                    geneticCode.sizeMultiplier = Math.max(0.7, Math.min(1.5, geneticCode.sizeMultiplier));
+                }
+
+                // Set properties based on genetic code
+                const size = ORGANISM_BASE_SIZE * geneticCode.sizeMultiplier;
+                super(x, y, size, 0, 1, 0); // Organisms are green
+                this.geneticCode = geneticCode;
+                this.speed = ORGANISM_BASE_SPEED * geneticCode.speedMultiplier;
+                this.energyDecay = ENERGY_DECAY_RATE * geneticCode.decayMultiplier;
+
+                this.energy = MAX_ENERGY; // Start with full energy
+                this.targetFood = null; // The food item the organism is currently moving towards
+                this.dying = false; // Flag to indicate if the organism is in the dying animation
+                this.dyingAnimationProgress = 0; // Progress of the dying animation (0 to 1)
+                this.wanderAngle = Math.random() * Math.PI * 2; // Initial random direction for wandering
+            }
+
+            // Update the organism's state each frame
+            update(foodArray) {
+                if (this.dying) {
+                    // Update death animation
+                    this.dyingAnimationProgress += 1 / DEATH_ANIMATION_DURATION;
+                    this.alpha = 1.0 - this.dyingAnimationProgress; // Fade out
+                    if (this.dyingAnimationProgress >= 1.0) {
+                        this.active = false; // Fully dead, can be removed or reset later if needed
+                        this.alpha = 0; // Ensure fully transparent
+                    }
+                    return; // Don't perform other actions while dying
+                }
+
+                if (!this.active) return; // If the organism is dead and not animating, do nothing
+
+                this.energy -= this.energyDecay; // Decrease energy based on its decay rate
+
+                // Check if the organism has run out of energy
+                if (this.energy <= 0) {
+                    this.energy = 0;
+                    this.dying = true; // Start the dying animation
+                    this.dyingAnimationProgress = 0;
+                    // Note: active remains true during animation so it's still drawn
+                    return; // Stop updating if starting to die
+                }
+
+                // --- Reproduction Check ---
+                if (this.energy > REPRODUCTION_THRESHOLD && organisms.length < MAX_POPULATION) {
+                     this.reproduce();
+                }
+
+
+                // --- Simple Intelligence: Behavior based on hunger ---
+                if (this.energy < HUNGER_THRESHOLD) {
+                     // HUNGRY: Actively seek and move towards nearest food
+                     if (!this.targetFood || !this.targetFood.active) {
+                         this.targetFood = this.findNearestFood(foodArray);
+                     }
+
+                     // If a target food is found and is active
+                     if (this.targetFood && this.targetFood.active) {
+                         const dx = this.targetFood.x - this.x; // Difference in x coordinates
+                         const dy = this.targetFood.y - this.y; // Difference in y coordinates
+                         const distance = Math.sqrt(dx * dx + dy * dy); // Distance to target food
+
+                         // Check for collision with the target food
+                         if (distance < (this.size / 2 + this.targetFood.size / 2)) {
+                             // Collision occurred: Consume food ONLY IF NOT FULL
+                             if (this.energy < MAX_ENERGY) {
+                                 this.energy = Math.min(MAX_ENERGY, this.energy + FOOD_ENERGY_VALUE); // Gain energy, capped at MAX_ENERGY
+                                 this.targetFood.active = false; // Mark food as inactive (eaten)
+                                 this.targetFood = null; // Clear the target food
+                                  // Reset color in case it was partially faded while dying before eating
+                                 this.r = 0; this.g = 1; this.b = 0; this.alpha = 1.0;
+                             }
+                         } else {
+                             // No collision: Move towards food at normal speed
+                             const angle = Math.atan2(dy, dx); // Calculate the angle to the target
+                             const currentSpeed = this.speed; // Use full speed when hungry
+                             this.x += Math.cos(angle) * currentSpeed; // Move in x direction
+                             this.y += Math.sin(angle) * currentSpeed; // Move in y direction
+                         }
+                     } else {
+                         // If hungry but no food found, still wander slowly
+                         this.wander(this.speed * SLOW_SPEED_FACTOR);
+                     }
+                } else {
+                    // NOT HUNGRY: Wander slowly
+                    this.targetFood = null; // Clear target food
+                    this.wander(this.speed * SLOW_SPEED_FACTOR);
+                }
+            }
+
+            // Simple wandering behavior
+            wander(speed) {
+                 // Occasionally change direction
+                if (Math.random() < 0.01) { // 1% chance per frame to change direction
+                    this.wanderAngle = Math.random() * Math.PI * 2;
+                }
+
+                // Move in the current wander direction at the given speed
+                this.x += Math.cos(this.wanderAngle) * speed;
+                this.y += Math.sin(this.wanderAngle) * speed;
+
+                // Keep within canvas bounds (simple wrap-around)
+                if (this.x < 0) this.x = gl.canvas.width;
+                if (this.x > gl.canvas.width) this.x = 0;
+                if (this.y < 0) this.y = gl.canvas.height;
+                if (this.y > gl.canvas.height) this.y = 0;
+            }
+
+
+             // Reproduce, creating a new organism with mutated genes
+            reproduce() {
+                this.energy -= REPRODUCTION_COST; // Pay the energy cost
+
+                // Create a new genetic code for the child by copying and mutating
+                const childGeneticCode = {};
+                for (const gene in this.geneticCode) {
+                    childGeneticCode[gene] = this.geneticCode[gene];
+                    // Apply mutation
+                    if (Math.random() < MUTATION_RATE) {
+                        const mutation = (Math.random() - 0.5) * 2 * MUTATION_AMOUNT; // Random change between -MUTATION_AMOUNT and +MUTATION_AMOUNT
+                         childGeneticCode[gene] += childGeneticCode[gene] * mutation;
+
+                         // Clamp mutated values to reasonable ranges (similar to initial clamping)
+                         if (gene === 'speedMultiplier') {
+                             childGeneticCode[gene] = Math.max(0.5, Math.min(2.0, childGeneticCode[gene]));
+                         } else if (gene === 'decayMultiplier') {
+                             childGeneticCode[gene] = Math.max(0.5, Math.min(2.0, childGeneticCode[gene]));
+                         } else if (gene === 'sizeMultiplier') {
+                             childGeneticCode[gene] = Math.max(0.7, Math.min(1.5, childGeneticCode[gene]));
+                         }
+                    }
+                }
+
+                // Create the new organism near the parent
+                const child = new Organism(this.x + (Math.random() - 0.5) * 20, this.y + (Math.random() - 0.5) * 20, childGeneticCode);
+                child.energy = REPRODUCTION_COST * 0.8; // Child starts with some energy
+
+                organisms.push(child); // Add the new organism to the simulation
+            }
+
+
+            // Find the nearest active food item in the food array
+            findNearestFood(foodArray) {
+                let nearest = null;
+                let minDistanceSq = Infinity; // Initialize with a very large distance
+
+                // Iterate through all food items
+                for (const food of foodArray) {
+                    if (food.active) { // Only consider active food
+                        const dx = food.x - this.x;
+                        const dy = food.y - this.y;
+                        const distanceSq = dx * dx + dy * dy; // Calculate squared distance (avoids sqrt for comparison)
+                        // If this food is closer than the current nearest
+                        if (distanceSq < minDistanceSq) {
+                            minDistanceSq = distanceSq;
+                            nearest = food; // Set this food as the nearest
+                        }
+                    }
+                }
+                return nearest; // Return the nearest food item found
+            }
+
+            // Get vertices for both the organism and its energy bar
+            getRenderData() {
+                const vertices = [];
+                const colors = [];
+
+                // Add organism vertices and colors
+                vertices.push(...this.getVertices());
+                colors.push(...this.getColors()); // Uses this.alpha for fade-out
+
+                // Add energy bar vertices and colors if not dying
+                if (!this.dying) {
+                    const energyBarWidth = (this.energy / MAX_ENERGY) * (this.size * ENERGY_BAR_WIDTH_FACTOR);
+                    const barX = this.x; // Center the bar above the organism
+                    const barY = this.y - this.size / 2 - ENERGY_BAR_HEIGHT / 2 - 2; // Position above the organism
+
+                    const barX1 = barX - energyBarWidth / 2;
+                    const barY1 = barY - ENERGY_BAR_HEIGHT / 2;
+                    const barX2 = barX + energyBarWidth / 2;
+                    const barY2 = barY + ENERGY_BAR_HEIGHT / 2;
+
+                    vertices.push(
+                        barX1, barY1,
+                        barX2, barY1,
+                        barX1, barY2,
+                        barX1, barY2,
+                        barX2, barY1,
+                        barX2, barY2
+                    );
+
+                    // Determine energy bar color based on energy level
+                    let energyColor;
+                    if (this.energy > MAX_ENERGY * 0.6) {
+                        energyColor = [0, 1, 0, 1]; // Green
+                    } else if (this.energy > MAX_ENERGY * 0.3) {
+                        energyColor = [1, 1, 0, 1]; // Yellow
+                    } else {
+                        energyColor = [1, 0, 0, 1]; // Red
+                    }
+
+                    for(let i = 0; i < 6; i++) {
+                        colors.push(...energyColor);
+                    }
+                }
+
+
+                return { vertices, colors };
+            }
+        }
+
+        // Represents a food item
+        class Food extends Entity {
+            constructor() {
+                // Initialize food at a random position
+                super(
+                    Math.random() * gl.canvas.width,
+                    Math.random() * gl.canvas.height,
+                    FOOD_SIZE,
+                    1, 0, 0 // Food is red
+                );
+                this.energyValue = FOOD_ENERGY_VALUE; // Energy provided by this food
+            }
+
+            // Respawn the food at a new random location when consumed
+            respawn() {
+                this.x = Math.random() * gl.canvas.width;
+                this.y = Math.random() * gl.canvas.height;
+                this.active = true; // Make the food active again
+                this.alpha = 1.0; // Ensure it's fully visible
+            }
+
+             // Food just needs to return its own vertices and colors
+            getRenderData() {
+                 if (this.active) {
+                    return {
+                        vertices: this.getVertices(),
+                        colors: this.getColors() // Uses this.alpha (though food doesn't fade in this version)
+                    };
+                 }
+                 return { vertices: [], colors: [] }; // Return empty if inactive
+            }
+        }
+
+        // Arrays to hold our organisms and food items
+        let organisms = [];
+        let foodItems = [];
+        const populationCountSpan = document.getElementById('populationCount');
+        const currentFoodCountSpan = document.getElementById('currentFoodCount');
+        const addFoodBtn = document.getElementById('addFoodBtn');
+        const removeFoodBtn = document.getElementById('removeFoodBtn');
+
+
+        // Initialize organisms and food items
+        function initializeSimulation() {
+            organisms = []; // Clear existing
+            foodItems = []; // Clear existing
+
+            for (let i = 0; i < INITIAL_ORGANISMS; i++) {
+                organisms.push(new Organism(
+                    Math.random() * gl.canvas.width,
+                    Math.random() * gl.canvas.height
+                ));
+            }
+
+            // Initialize food based on currentFoodCount
+            for (let i = 0; i < currentFoodCount; i++) {
+                foodItems.push(new Food());
+            }
+             updateFoodCountDisplay(); // Update display initially
+        }
+
+        // Initialize on load
+        initializeSimulation();
+
+        // --- Food Control Functions ---
+        function addFood(amount) {
+            const newFoodCount = Math.min(MAX_FOOD, currentFoodCount + amount);
+            const foodToAdd = newFoodCount - currentFoodCount;
+            for (let i = 0; i < foodToAdd; i++) {
+                foodItems.push(new Food());
+            }
+            currentFoodCount = newFoodCount;
+            updateFoodCountDisplay();
+        }
+
+        function removeFood(amount) {
+            const newFoodCount = Math.max(MIN_FOOD, currentFoodCount - amount);
+            const foodToRemove = currentFoodCount - newFoodCount;
+            // Simply mark existing food as inactive to be removed in the update loop
+            let removedCount = 0;
+            for (let i = foodItems.length - 1; i >= 0 && removedCount < foodToRemove; i--) {
+                 if (foodItems[i].active) {
+                     foodItems[i].active = false;
+                     removedCount++;
+                 }
+            }
+            currentFoodCount = newFoodCount;
+            updateFoodCountDisplay();
+        }
+
+        function updateFoodCountDisplay() {
+            currentFoodCountSpan.textContent = currentFoodCount;
+        }
+
+        // Add event listeners to buttons
+        addFoodBtn.addEventListener('click', () => addFood(10)); // Add 10 food items
+        removeFoodBtn.addEventListener('click', () => removeFood(10)); // Remove 10 food items
+
+
+        // --- Rendering Loop ---
+
+        // Function to draw the scene
+        function drawScene() {
+            gl.clear(gl.COLOR_BUFFER_BIT); // Clear the canvas
+
+            let allPositions = []; // Array to hold vertex positions for all entities
+            let allColors = [];    // Array to hold vertex colors for all entities
+            let totalVertices = 0; // Counter for the total number of vertices
+
+            // Collect data for organisms (active or dying)
+            for (const organism of organisms) {
+                if (organism.active || organism.dying) {
+                    const renderData = organism.getRenderData();
+                    allPositions.push(...renderData.vertices);
+                    allColors.push(...renderData.colors);
+                    totalVertices += renderData.vertices.length / 2; // 2 components per vertex (x, y)
+                }
+            }
+
+            // Collect data for active food items
+            // Filter out inactive food items before collecting render data
+            const activeFood = foodItems.filter(food => food.active);
+            for (const food of activeFood) {
+                const renderData = food.getRenderData();
+                 allPositions.push(...renderData.vertices);
+                 allColors.push(...renderData.colors);
+                 totalVertices += renderData.vertices.length / 2;
+            }
+
+            // Bind and update the position buffer with all collected vertex positions
+            gl.bindBuffer(gl.ARRAY_BUFFER, positionBuffer);
+            gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(allPositions), gl.STATIC_DRAW);
+
+            // Tell WebGL how to pull positions from the position buffer
+            gl.enableVertexAttribArray(positionAttributeLocation);
+            gl.vertexAttribPointer(positionAttributeLocation, 2, gl.FLOAT, false, 0, 0); // 2 components (x, y), float type, no normalization, no stride, no offset
+
+            // Bind and update the color buffer with all collected vertex colors
+            gl.bindBuffer(gl.ARRAY_BUFFER, colorBuffer);
+            gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(allColors), gl.STATIC_DRAW);
+
+            // Tell WebGL how to pull colors from the color buffer
+            gl.enableVertexAttribArray(colorAttributeLocation);
+            gl.vertexAttribPointer(colorAttributeLocation, 4, gl.FLOAT, false, 0, 0); // 4 components (RGBA), float type, no normalization, no stride, no offset
+
+            // Draw all the collected vertices as triangles
+            gl.drawArrays(gl.TRIANGLES, 0, totalVertices);
+        }
+
+        // Function to update the simulation state
+        function updateSimulation() {
+            // Update each organism's state
+            // Iterate backwards to safely remove dying organisms
+            for (let i = organisms.length - 1; i >= 0; i--) {
+                const organism = organisms[i];
+                organism.update(foodItems);
+                // Remove fully dead organisms after update
+                if (!organism.active && !organism.dying) {
+                    organisms.splice(i, 1);
+                }
+            }
+
+            // Remove inactive food items from the array
+            foodItems = foodItems.filter(food => food.active);
+
+            // Ensure the number of food items matches currentFoodCount by respawning if needed
+            while (foodItems.length < currentFoodCount) {
+                 const newFood = new Food();
+                 foodItems.push(newFood);
+            }
+
+
+             // Update population count display
+            populationCountSpan.textContent = organisms.length;
+        }
+
+        // The main game loop
+        function gameLoop() {
+            updateSimulation(); // Update the state of all entities
+            drawScene();        // Redraw the scene
+            requestAnimationFrame(gameLoop); // Request the next frame
+        }
+
+        // Start the game loop when the window has finished loading
+        window.onload = function () {
+             gameLoop();
+        }
+
+
+        // Basic responsiveness: Resize canvas and update WebGL viewport
+        window.addEventListener('resize', () => {
+            canvas.width = window.innerWidth;
+            canvas.height = window.innerHeight;
+            gl.viewport(0, 0, gl.canvas.width, gl.canvas.height);
+            gl.uniform2f(resolutionUniformLocation, gl.canvas.width, gl.canvas.height);
+            // Note: For true responsiveness, entity positions and sizes might need scaling
+            // This example keeps them fixed in pixel space relative to the top-left
+        });
+
+        // Initial resize call to set canvas size on load
+        window.dispatchEvent(new Event('resize'));
+
+
+    </script>
+</body>
+</html>
