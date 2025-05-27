@@ -14,14 +14,13 @@
             justify-content: center;
             align-items: center;
             min-height: 100vh;
-            flex-direction: column; /* Stack canvas and controls vertically */
+            flex-direction: column; /* Stack canvas and info vertically */
         }
         /* Style the canvas with a border and background */
         canvas {
             border: 1px solid #555;
             background-color: #000;
             display: block; /* Remove extra space below canvas */
-            margin-bottom: 10px; /* Space between canvas and controls */
         }
         /* Style for the information overlay */
         #info {
@@ -38,54 +37,22 @@
             z-index: 10; /* Ensure it's above the canvas */
         }
 
-        /* Style for the controls container */
-        #controls {
-            display: flex;
-            gap: 10px; /* Space between buttons */
-            align-items: center;
-            color: white;
-            font-family: monospace;
-            font-size: 14px;
-        }
+        /* Removed #controls styling as buttons are gone */
 
-        /* Style for the buttons */
-        #controls button {
-            padding: 8px 15px;
-            font-size: 14px;
-            font-family: monospace;
-            cursor: pointer;
-            border: none;
-            border-radius: 5px;
-            background-color: #555;
-            color: white;
-            transition: background-color 0.2s ease;
-        }
-
-        #controls button:hover {
-            background-color: #777;
-        }
-
-        #controls button:active {
-            background-color: #999;
-        }
     </style>
 </head>
 <body>
     <canvas id="gameCanvas" width="800" height="600"></canvas>
-
-    <div id="controls">
-        <button id="addFoodBtn">+ Food</button>
-        <button id="removeFoodBtn">- Food</button>
-        <span>Current Food: <span id="currentFoodCount">0</span></span>
-    </div>
 
     <div id="info">
         <p>Organisms (Green) move slowly when full, seek food when hungry.</p>
         <p>Organisms reproduce when they have high energy.</p>
         <p>Organisms lose energy, gain energy by eating.</p>
         <p>If energy reaches zero, they die (fade out).</p>
+        <p>New organisms have a growth animation.</p>
         <p>Energy bar above organisms shows remaining energy.</p>
         <p>Population: <span id="populationCount">0</span></p>
+        <p>Food: <span id="currentFoodCount">0</span> (Use &larr; / &rarr; keys)</p>
     </div>
 
     <script>
@@ -218,14 +185,16 @@
         const ENERGY_BAR_HEIGHT = 3; // Height of the energy bar
         const ENERGY_BAR_WIDTH_FACTOR = 1.5; // Energy bar width relative to organism size
         const DEATH_ANIMATION_DURATION = 60; // Frames for death animation
+        const BIRTH_ANIMATION_DURATION = 30; // Frames for birth animation (growth)
         const HUNGER_THRESHOLD = MAX_ENERGY * 0.6; // Organisms seek food when energy drops below this (adjusted slightly)
         const REPRODUCTION_THRESHOLD = MAX_ENERGY * 0.9; // Organisms reproduce when energy is above this
         const REPRODUCTION_COST = MAX_ENERGY * 0.4; // Energy cost for reproduction
         const MUTATION_RATE = 0.1; // Probability of a gene mutating (per gene)
         const MUTATION_AMOUNT = 0.1; // Maximum percentage change during mutation
         const MAX_POPULATION = 300; // Maximum number of organisms allowed (increased slightly)
-        const MIN_FOOD = 10; // Minimum number of food items
+        const MIN_FOOD = 0; // Minimum number of food items (CHANGED TO 0)
         const MAX_FOOD = 200; // Maximum number of food items
+        const FOOD_CONTROL_AMOUNT = 10; // Amount of food to add/remove with key presses
 
         // Base class for entities in the simulation (Organisms and Food)
         class Entity {
@@ -286,9 +255,8 @@
                     geneticCode.sizeMultiplier = Math.max(0.7, Math.min(1.5, geneticCode.sizeMultiplier));
                 }
 
-                // Set properties based on genetic code
-                const size = ORGANISM_BASE_SIZE * geneticCode.sizeMultiplier;
-                super(x, y, size, 0, 1, 0); // Organisms are green
+                const initialSize = ORGANISM_BASE_SIZE * geneticCode.sizeMultiplier;
+                super(x, y, initialSize, 0, 1, 0); // Organisms are green
                 this.geneticCode = geneticCode;
                 this.speed = ORGANISM_BASE_SPEED * geneticCode.speedMultiplier;
                 this.energyDecay = ENERGY_DECAY_RATE * geneticCode.decayMultiplier;
@@ -298,6 +266,10 @@
                 this.dying = false; // Flag to indicate if the organism is in the dying animation
                 this.dyingAnimationProgress = 0; // Progress of the dying animation (0 to 1)
                 this.wanderAngle = Math.random() * Math.PI * 2; // Initial random direction for wandering
+
+                // Birth animation properties
+                this.isNewborn = true;
+                this.birthAnimationProgress = 0;
             }
 
             // Update the organism's state each frame
@@ -307,13 +279,25 @@
                     this.dyingAnimationProgress += 1 / DEATH_ANIMATION_DURATION;
                     this.alpha = 1.0 - this.dyingAnimationProgress; // Fade out
                     if (this.dyingAnimationProgress >= 1.0) {
-                        this.active = false; // Fully dead, can be removed or reset later if needed
+                        this.active = false; // Fully dead, will be filtered out
                         this.alpha = 0; // Ensure fully transparent
                     }
                     return; // Don't perform other actions while dying
                 }
 
                 if (!this.active) return; // If the organism is dead and not animating, do nothing
+
+                // Handle birth animation
+                if (this.isNewborn) {
+                    this.birthAnimationProgress += 1 / BIRTH_ANIMATION_DURATION;
+                    if (this.birthAnimationProgress >= 1.0) {
+                        this.isNewborn = false;
+                        this.birthAnimationProgress = 1.0; // Ensure it's fully grown
+                    }
+                    // Adjust size for birth animation
+                    this.size = (ORGANISM_BASE_SIZE * this.geneticCode.sizeMultiplier) * this.birthAnimationProgress;
+                }
+
 
                 this.energy -= this.energyDecay; // Decrease energy based on its decay rate
 
@@ -450,15 +434,26 @@
                 const vertices = [];
                 const colors = [];
 
+                // Calculate current size based on birth animation
+                const currentSize = this.isNewborn ? (ORGANISM_BASE_SIZE * this.geneticCode.sizeMultiplier) * this.birthAnimationProgress : this.size;
+
+                // Temporarily override size for rendering based on animation
+                const originalSize = this.size;
+                this.size = currentSize;
+
                 // Add organism vertices and colors
                 vertices.push(...this.getVertices());
                 colors.push(...this.getColors()); // Uses this.alpha for fade-out
 
+                // Restore original size
+                this.size = originalSize;
+
+
                 // Add energy bar vertices and colors if not dying
                 if (!this.dying) {
-                    const energyBarWidth = (this.energy / MAX_ENERGY) * (this.size * ENERGY_BAR_WIDTH_FACTOR);
+                    const energyBarWidth = (this.energy / MAX_ENERGY) * (currentSize * ENERGY_BAR_WIDTH_FACTOR); // Use currentSize
                     const barX = this.x; // Center the bar above the organism
-                    const barY = this.y - this.size / 2 - ENERGY_BAR_HEIGHT / 2 - 2; // Position above the organism
+                    const barY = this.y - currentSize / 2 - ENERGY_BAR_HEIGHT / 2 - 2; // Position above the organism, use currentSize
 
                     const barX1 = barX - energyBarWidth / 2;
                     const barY1 = barY - ENERGY_BAR_HEIGHT / 2;
@@ -532,8 +527,8 @@
         let foodItems = [];
         const populationCountSpan = document.getElementById('populationCount');
         const currentFoodCountSpan = document.getElementById('currentFoodCount');
-        const addFoodBtn = document.getElementById('addFoodBtn');
-        const removeFoodBtn = document.getElementById('removeFoodBtn');
+
+        // Removed button elements
 
 
         // Initialize organisms and food items
@@ -572,11 +567,11 @@
         function removeFood(amount) {
             const newFoodCount = Math.max(MIN_FOOD, currentFoodCount - amount);
             const foodToRemove = currentFoodCount - newFoodCount;
-            // Simply mark existing food as inactive to be removed in the update loop
+            // Iterate backwards to safely remove active food items
             let removedCount = 0;
             for (let i = foodItems.length - 1; i >= 0 && removedCount < foodToRemove; i--) {
                  if (foodItems[i].active) {
-                     foodItems[i].active = false;
+                     foodItems[i].active = false; // Mark as inactive
                      removedCount++;
                  }
             }
@@ -585,12 +580,17 @@
         }
 
         function updateFoodCountDisplay() {
-            currentFoodCountSpan.textContent = currentFoodCount;
+            currentFoodCountSpan.textContent = foodItems.filter(food => food.active).length; // Display active food count
         }
 
-        // Add event listeners to buttons
-        addFoodBtn.addEventListener('click', () => addFood(10)); // Add 10 food items
-        removeFoodBtn.addEventListener('click', () => removeFood(10)); // Remove 10 food items
+        // --- Keyboard Controls ---
+        window.addEventListener('keydown', (event) => {
+            if (event.key === 'ArrowRight') {
+                addFood(FOOD_CONTROL_AMOUNT); // Add food with right arrow
+            } else if (event.key === 'ArrowLeft') {
+                removeFood(FOOD_CONTROL_AMOUNT); // Remove food with left arrow
+            }
+        });
 
 
         // --- Rendering Loop ---
@@ -646,15 +646,13 @@
         // Function to update the simulation state
         function updateSimulation() {
             // Update each organism's state
-            // Iterate backwards to safely remove dying organisms
-            for (let i = organisms.length - 1; i >= 0; i--) {
-                const organism = organisms[i];
+            for (const organism of organisms) {
                 organism.update(foodItems);
-                // Remove fully dead organisms after update
-                if (!organism.active && !organism.dying) {
-                    organisms.splice(i, 1);
-                }
             }
+
+            // Filter out fully dead organisms after update
+            organisms = organisms.filter(org => org.active || (org.dying && org.dyingAnimationProgress < 1.0));
+
 
             // Remove inactive food items from the array
             foodItems = foodItems.filter(food => food.active);
@@ -668,6 +666,7 @@
 
              // Update population count display
             populationCountSpan.textContent = organisms.length;
+             updateFoodCountDisplay(); // Update food count display based on active food
         }
 
         // The main game loop
